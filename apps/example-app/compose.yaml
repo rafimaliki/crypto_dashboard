@@ -1,0 +1,16 @@
+services:
+  example-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./src:/app/src
+      - ./package.json:/app/package.json
+      - ./bun.lockb:/app/bun.lockb
+    environment:
+      - PORT=3000
+    restart: unless-stopped
+    networks:
+      - crypto-dashboard

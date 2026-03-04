@@ -1,0 +1,53 @@
+# https://kubernetes.io/docs/concepts/services-networking/service/
+apiVersion: v1
+kind: Service
+metadata:
+  name: mlflow
+  namespace: default
+  labels:
+    app: mlflow
+spec:
+  type: ClusterIP
+  selector:
+    app: mlflow
+  ports:
+    - port: 5001
+      targetPort: 5001
+      protocol: TCP
+      name: http
+---
+# https://kubernetes.io/docs/concepts/services-networking/service/
+apiVersion: v1
+kind: Service
+metadata:
+  name: ml-predict
+  namespace: default
+  labels:
+    app: ml-predict
+spec:
+  type: ClusterIP
+  selector:
+    app: ml-predict
+  ports:
+    - port: 8000
+      targetPort: 8000
+      protocol: TCP
+      name: http
+---
+# https://kubernetes.io/docs/concepts/services-networking/service/
+apiVersion: v1
+kind: Service
+metadata:
+  name: ml-train
+  namespace: default
+  labels:
+    app: ml-train
+spec:
+  type: ClusterIP
+  selector:
+    app: ml-train
+  ports:
+    - port: 8000
+      targetPort: 8000
+      protocol: TCP
+      name: http

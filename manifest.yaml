@@ -1,0 +1,679 @@
+---
+# ================================
+# PostgreSQL
+# ================================
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-secret
+type: Opaque
+stringData:
+  POSTGRES_USER: postgres
+  POSTGRES_PASSWORD: postgres
+  POSTGRES_DB: postgres
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+spec:
+  selector:
+    app: postgres
+  ports:
+    - port: 5432
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  volumeClaimTemplates:
+    - metadata:
+        name: pgdata
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 5Gi
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:18
+          envFrom:
+            - secretRef:
+                name: postgres-secret
+          volumeMounts:
+            - name: pgdata
+              mountPath: /var/lib/postgresql
+
+---
+# ================================
+# Kafka
+# ================================
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kafka-config
+data:
+  KAFKA_NODE_ID: "1"
+  KAFKA_PROCESS_ROLES: "broker,controller"
+  KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093"
+  KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://kafka:9092"
+  KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+  KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT"
+  KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka-0.kafka:9093"
+  KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+  KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kafka
+spec:
+  clusterIP: None
+  selector:
+    app: kafka
+  ports:
+    - name: broker
+      port: 9092
+    - name: controller
+      port: 9093
+
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: kafka
+spec:
+  serviceName: kafka
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kafka
+  template:
+    metadata:
+      labels:
+        app: kafka
+    spec:
+      containers:
+        - name: kafka
+          image: apache/kafka:4.1.1
+          ports:
+            - containerPort: 9092
+            - containerPort: 9093
+          envFrom:
+            - configMapRef:
+                name: kafka-config
+          volumeMounts:
+            - name: kafka-data
+              mountPath: /var/lib/kafka/data
+  volumeClaimTemplates:
+    - metadata:
+        name: kafka-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 10Gi
+
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: kafka-init
+spec:
+  backoffLimit: 5
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: kafka-init
+          image: apache/kafka:4.1.1
+          command:
+            - sh
+            - -c
+            - |
+              /opt/kafka/bin/kafka-topics.sh \
+                --bootstrap-server kafka:9092 \
+                --create \
+                --if-not-exists \
+                --topic btc_usd
+
+---
+# ================================
+# DataOps
+# ================================
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: listener
+  namespace: default
+  labels:
+    app: listener
+spec:
+  selector:
+    matchLabels:
+      app: listener
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: listener
+    spec:
+      containers:
+        - name: listener
+          image: dataops-listener:v1
+          env:
+            - name: KAFKA_HOST
+              value: kafka:9092
+            - name: COINBASE_WS
+              value: wss://ws-feed.exchange.coinbase.com
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: persistence
+  namespace: default
+  labels:
+    app: persistence
+spec:
+  selector:
+    matchLabels:
+      app: persistence
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: persistence
+    spec:
+      containers:
+        - name: persistence
+          image: dataops-persistence:v1
+          envFrom:
+            - secretRef:
+                name: postgres-secret
+          env:
+            - name: KAFKA_HOST
+              value: kafka:9092
+            - name: POSTGRES_HOST
+              value: postgres
+            - name: POSTGRES_PORT
+              value: "5432"
+
+---
+# ================================
+# ML-Ops
+# ================================
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mlflow
+  namespace: default
+  labels:
+    app: mlflow
+spec:
+  selector:
+    matchLabels:
+      app: mlflow
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: mlflow
+    spec:
+      containers:
+        - name: mlflow
+          image: mlflow:v1
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 5001
+          env:
+            - name: MLFLOW_BACKEND_STORE_URI
+              value: postgresql://postgres:postgres@postgres:5432/postgres
+            - name: MLFLOW_ARTIFACT_ROOT
+              value: /mlflow/artifacts
+            - name: MLFLOW_HOST
+              value: 0.0.0.0
+            - name: MLFLOW_PORT
+              value: "5001"
+          volumeMounts:
+            - name: mlflow-artifacts
+              mountPath: /mlflow/artifacts
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 5001
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 5001
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
+      volumes:
+        - name: mlflow-artifacts
+          emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mlflow
+  namespace: default
+  labels:
+    app: mlflow
+spec:
+  type: ClusterIP
+  selector:
+    app: mlflow
+  ports:
+    - port: 5001
+      targetPort: 5001
+      protocol: TCP
+      name: http
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ml-predict
+  namespace: default
+  labels:
+    app: ml-predict
+spec:
+  selector:
+    matchLabels:
+      app: ml-predict
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: ml-predict
+    spec:
+      containers:
+        - name: ml-predict
+          image: ml-predict:v1
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          env:
+            - name: MLFLOW_TRACKING_URI
+              value: http://mlflow:5001
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_USER
+            - name: DB_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_PASSWORD
+            - name: DB_HOST
+              value: postgres
+            - name: DB_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_DB
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ml-predict
+  namespace: default
+  labels:
+    app: ml-predict
+spec:
+  type: ClusterIP
+  selector:
+    app: ml-predict
+  ports:
+    - port: 8000
+      targetPort: 8000
+      protocol: TCP
+      name: http
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ml-train
+  namespace: default
+  labels:
+    app: ml-train
+spec:
+  selector:
+    matchLabels:
+      app: ml-train
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: ml-train
+    spec:
+      containers:
+        - name: ml-train
+          image: ml-train:v1
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          env:
+            - name: MLFLOW_TRACKING_URI
+              value: http://mlflow:5001
+            - name: DB_USER
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_USER
+            - name: DB_PASS
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_PASSWORD
+            - name: DB_HOST
+              value: postgres
+            - name: DB_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-secret
+                  key: POSTGRES_DB
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ml-train
+  namespace: default
+  labels:
+    app: ml-train
+spec:
+  type: ClusterIP
+  selector:
+    app: ml-train
+  ports:
+    - port: 8000
+      targetPort: 8000
+      protocol: TCP
+      name: http
+
+---
+# ================================
+# Superset
+# ================================
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: superset-secret
+  namespace: default
+type: Opaque
+data:
+  SUPERSET_SECRET_KEY: TmFzaVNvdG9EYWdpbmc= # NasiSotoDaging
+
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: superset-home-pv
+spec:
+  capacity:
+    storage: 2Gi
+  volumeMode: Filesystem
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: slow
+  hostPath:
+    path: /data/pv/superset-home
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: superset-home-pvc
+  namespace: default
+  labels:
+    app: superset-home-pvc
+spec:
+  storageClassName: slow
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: superset
+  namespace: default
+  labels:
+    app: superset
+spec:
+  selector:
+    matchLabels:
+      app: superset
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: superset
+    spec:
+      initContainers:
+        - name: init-superset-permissions
+          image: busybox
+          command:
+            - sh
+            - -c
+            - chown -R 1000:1000 /app/superset_home
+          volumeMounts:
+            - name: superset-home
+              mountPath: /app/superset_home
+      containers:
+        - name: superset
+          image: superset-pgdriver:v1
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef:
+                name: superset-secret
+          ports:
+            - containerPort: 8088
+          command:
+            - /bin/sh
+            - -c
+            - |
+              superset db upgrade &&
+              superset init &&
+              superset fab create-admin \
+                --username admin \
+                --firstname admin \
+                --lastname user \
+                --email admin@localhost \
+                --password admin \
+                || true &&
+              superset run -h 0.0.0.0 -p 8088
+          volumeMounts:
+            - name: superset-home
+              mountPath: /app/superset_home
+      volumes:
+        - name: superset-home
+          persistentVolumeClaim:
+            claimName: superset-home-pvc
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: superset
+  namespace: default
+spec:
+  selector:
+    app: superset
+  type: NodePort
+  ports:
+    - port: 8088
+      targetPort: 8088
+
+---
+# ================================
+# n8n
+# ================================
+
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: n8n-data-pv
+spec:
+  capacity:
+    storage: 2Gi
+  volumeMode: Filesystem
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: slow
+  hostPath:
+    path: /data/pv/n8n
+
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: n8n-files-pv
+spec:
+  capacity:
+    storage: 2Gi
+  volumeMode: Filesystem
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: slow
+  hostPath:
+    path: /data/pv/n8n-files
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: n8n-data-pvc
+  namespace: default
+spec:
+  storageClassName: slow
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: n8n-files-pvc
+  namespace: default
+spec:
+  storageClassName: slow
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: n8n
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: n8n
+  template:
+    metadata:
+      labels:
+        app: n8n
+    spec:
+      initContainers:
+        - name: init-n8n-permissions
+          image: busybox
+          command:
+            - sh
+            - -c
+            - chown -R 1000:1000 /home/node/.n8n
+          volumeMounts:
+            - name: n8n-data
+              mountPath: /home/node/.n8n
+      containers:
+        - name: n8n
+          image: docker.n8n.io/n8nio/n8n
+          ports:
+            - containerPort: 5678
+          env:
+            - name: N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS
+              value: "true"
+            - name: N8N_RUNNERS_ENABLED
+              value: "true"
+            - name: NODE_ENV
+              value: "production"
+            - name: GENERIC_TIMEZONE
+              value: "Asia/Jakarta"
+            - name: TZ
+              value: "Asia/Jakarta"
+            - name: DB_SQLITE_POOL_SIZE
+              value: "5"
+            - name: N8N_BLOCK_ENV_ACCESS_IN_NODE
+              value: "false"
+            - name: N8N_GIT_NODE_DISABLE_BARE_REPOS
+              value: "true"
+          volumeMounts:
+            - name: n8n-data
+              mountPath: /home/node/.n8n
+            - name: n8n-files
+              mountPath: /files
+      volumes:
+        - name: n8n-data
+          persistentVolumeClaim:
+            claimName: n8n-data-pvc
+        - name: n8n-files
+          persistentVolumeClaim:
+            claimName: n8n-files-pvc
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: n8n
+  namespace: default
+spec:
+  selector:
+    app: n8n
+  type: NodePort
+  ports:
+    - port: 5678
+      targetPort: 5678

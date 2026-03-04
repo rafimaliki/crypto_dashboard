@@ -1,0 +1,87 @@
+services:
+  mlflow:
+    build:
+      context: mlflow
+      dockerfile: Dockerfile
+    ports:
+      - "5000:5000"
+    user: "1000:1000"
+    environment:
+      MLFLOW_BACKEND_STORE_URI: postgresql://postgres:postgres@postgres:5432/postgres
+      MLFLOW_ARTIFACT_ROOT: /mlflow/artifacts
+      MLFLOW_HOST: 0.0.0.0
+      MLFLOW_PORT: 5000
+    volumes:
+      - mlflow_artifacts:/mlflow/artifacts:z
+    command:
+      - server
+      - --backend-store-uri
+      - postgresql://postgres:postgres@postgres:5432/postgres
+      - --default-artifact-root
+      - mlflow-artifacts:/
+      - --host
+      - 0.0.0.0
+      - --port
+      - "5000"
+      - --artifacts-destination 
+      - /mlflow/artifacts
+      - --serve-artifacts
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - crypto-dashboard
+
+  ml-predict:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: predict
+    user: "1000:1000"
+    ports:
+      - "8000:8000"
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      DB_USER: postgres
+      DB_PASS: postgres
+      DB_HOST: postgres
+      DB_NAME: postgres
+    depends_on:
+      mlflow:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - crypto-dashboard
+
+  ml-train:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: train
+    user: "1000:1000"
+    ports:
+      - "8001:8000"
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      DB_USER: postgres
+      DB_PASS: postgres
+      DB_HOST: postgres
+      DB_NAME: postgres
+    depends_on:
+      mlflow:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      persistence:
+        condition: service_started
+    restart: unless-stopped
+    networks:
+      - crypto-dashboard

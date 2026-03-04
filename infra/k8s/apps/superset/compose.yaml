@@ -1,0 +1,116 @@
+---
+# https://kubernetes.io/docs/concepts/configuration/secret/
+apiVersion: v1
+kind: Secret
+metadata:
+  name: superset-secret
+  namespace: default
+type: Opaque
+data:
+  SUPERSET_SECRET_KEY: TmFzaVNvdG9EYWdpbmc= # NasiSotoDaging
+---
+# https://kubernetes.io/docs/concepts/workloads/controllers/deployment/
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: superset
+  namespace: default
+  labels:
+    app: superset
+spec:
+  selector:
+    matchLabels:
+      app: superset
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: superset
+    spec:
+      initContainers:
+        - name: init-superset-permissions
+          image: busybox
+          command:
+            - sh
+            - -c
+            - chown -R 1000:1000 /app/superset_home
+          volumeMounts:
+            - name: superset-home
+              mountPath: /app/superset_home
+      containers:
+        - name: superset
+          image: localhost:5000/superset-pgdriver:latest
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef:
+                name: superset-secret
+          ports:
+            - containerPort: 8088
+          command:
+            - /bin/sh
+            - -c
+            - |
+              superset db upgrade &&
+              superset init &&
+              superset fab create-admin \
+                --username admin \
+                --firstname admin \
+                --lastname user \
+                --email admin@localhost \
+                --password admin \
+                || true &&
+              superset run -h 0.0.0.0 -p 8088
+          volumeMounts:
+            - name: superset-home
+              mountPath: /app/superset_home
+      volumes:
+        - name: superset-home
+          persistentVolumeClaim:
+            claimName: superset-home-pvc
+---
+# https://kubernetes.io/docs/concepts/storage/persistent-volumes/
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: superset-home-pvc
+  namespace: default
+  labels:
+    app: superset-home-pvc
+spec:
+  storageClassName: slow
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+---
+# https://kubernetes.io/docs/concepts/storage/persistent-volumes/
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: superset-home-pv
+spec:
+  capacity:
+    storage: 2Gi
+  volumeMode: Filesystem
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: slow
+  hostPath:
+    path: /data/pv/superset-home
+---
+# https://kubernetes.io/docs/concepts/services-networking/service/
+apiVersion: v1
+kind: Service
+metadata:
+  name: superset
+  namespace: default
+spec:
+  selector:
+    app: superset
+  type: NodePort
+  ports:
+    - port: 8088
+      targetPort: 8088
+---

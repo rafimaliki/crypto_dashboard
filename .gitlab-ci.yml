@@ -1,0 +1,237 @@
+# .gitlab-ci.yml
+
+workflow:
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "deployment"'
+    - when: never
+
+stages:
+  - health-check
+  - infra
+  - build
+  - deploy
+
+variables:
+  IMAGE_TAG: $CI_COMMIT_SHORT_SHA
+
+# --------------------------------
+# ------- HEALTH CHECK JOB -------
+# --------------------------------
+
+health-check:
+  stage: health-check
+  tags: [shell]
+  script:
+    - echo "Gitlab CI is running on branch $CI_COMMIT_BRANCH"
+    - whoami
+    - date
+    - kubectl version --client
+
+# --------------------------------
+
+# --------------------------------
+# ------- EXAMPLE APP JOB --------
+# --------------------------------
+
+# apply-example-app:
+#   stage: infra
+#   tags: [shell]
+#   rules:
+#     - changes:
+#         - apps/example-app/**/*
+#         - infra/k8s/apps/example-app/**/*
+#   script:
+#     - kubectl apply -f infra/k8s/apps/example-app/
+
+# build-example-app:
+#   stage: build
+#   tags: [shell]
+#   needs:
+#     - job: apply-example-app
+#       optional: true
+#   rules:
+#     - changes:
+#         - apps/example-app/**/*
+#   script:
+#     - cd apps/example-app
+#     - docker build -t localhost:5001/example-app:$IMAGE_TAG .
+#     - docker push localhost:5001/example-app:$IMAGE_TAG
+
+# deploy-example-app:
+#   stage: deploy
+#   tags: [shell]
+#   needs:
+#     - job: build-example-app
+#   rules:
+#     - changes:
+#         - apps/example-app/**/*
+#   script:
+#     - kubectl set image deployment/example-app example-app=localhost:5000/example-app:$IMAGE_TAG
+#     - kubectl rollout status deployment/example-app --timeout=120s
+
+# --------------------------------
+
+# --------------------------------
+# --------- DATAOPS JOB ----------
+# --------------------------------
+
+apply-dataops:
+  stage: infra
+  tags: [shell]
+  rules:
+    - changes:
+        - apps/dataops/**/*
+        - infra/k8s/apps/dataops/**/*
+  script:
+    - kubectl apply -f infra/k8s/apps/dataops/
+
+build-dataops:
+  stage: build
+  tags: [shell]
+  needs:
+    - job: apply-dataops
+      optional: true
+  rules:
+    - changes:
+        - apps/dataops/**/*
+  script:
+    - cd apps/dataops
+    - docker build --target listener -t localhost:5001/dataops-listener:$IMAGE_TAG .
+    - docker build --target persistence -t localhost:5001/dataops-persistence:$IMAGE_TAG .
+    - docker push localhost:5001/dataops-listener:$IMAGE_TAG
+    - docker push localhost:5001/dataops-persistence:$IMAGE_TAG
+
+deploy-dataops:
+  stage: deploy
+  tags: [shell]
+  needs:
+    - job: build-dataops
+  rules:
+    - changes:
+        - apps/dataops/**/*
+  script:
+    - kubectl set image deployment/listener listener=localhost:5000/dataops-listener:$IMAGE_TAG
+    - kubectl set image deployment/persistence persistence=localhost:5000/dataops-persistence:$IMAGE_TAG
+    - kubectl rollout status deployment/listener --timeout=120s
+    - kubectl rollout status deployment/persistence --timeout=120s
+
+# --------------------------------
+
+# --------------------------------
+# ---------- MLOPS JOB -----------
+# --------------------------------
+
+apply-mlops:
+  stage: infra
+  tags: [shell]
+  rules:
+    - changes:
+        - apps/ml-ops/**/*
+        - infra/k8s/apps/ml-ops/**/*
+  script:
+    - kubectl apply -f infra/k8s/apps/ml-ops/
+
+build-mlops:
+  stage: build
+  tags: [shell]
+  needs:
+    - job: apply-mlops
+      optional: true
+  rules:
+    - changes:
+        - apps/ml-ops/**/*
+  script:
+    - cd apps/ml-ops
+    - docker build --target train -t localhost:5001/ml-train:$IMAGE_TAG .
+    - docker build --target predict -t localhost:5001/ml-predict:$IMAGE_TAG .
+    - docker push localhost:5001/ml-train:$IMAGE_TAG
+    - docker push localhost:5001/ml-predict:$IMAGE_TAG
+
+    - cd mlflow
+    - docker build -t localhost:5001/mlflow:$IMAGE_TAG .
+    - docker push localhost:5001/mlflow:$IMAGE_TAG
+
+deploy-mlops:
+  stage: deploy
+  tags: [shell]
+  needs:
+    - job: build-mlops
+  rules:
+    - changes:
+        - apps/ml-ops/**/*
+  script:
+    - kubectl set image deployment/ml-train ml-train=localhost:5000/ml-train:$IMAGE_TAG
+    - kubectl set image deployment/ml-predict ml-predict=localhost:5000/ml-predict:$IMAGE_TAG
+    - kubectl set image deployment/mlflow mlflow=localhost:5000/mlflow:$IMAGE_TAG
+    - kubectl rollout status deployment/ml-train --timeout=120s
+    - kubectl rollout status deployment/ml-predict --timeout=120s
+    - kubectl rollout status deployment/mlflow --timeout=120s
+
+# --------------------------------
+
+# --------------------------------
+# ------ OTHER SERVICES JOB ------
+# --------------------------------
+
+apply-kafka:
+  stage: infra
+  tags: [shell]
+  rules:
+    - changes:
+        - infra/k8s/platform/kafka/**/*
+  script:
+    - kubectl apply -f infra/k8s/platform/kafka/
+
+apply-postgres:
+  stage: infra
+  tags: [shell]
+  rules:
+    - changes:
+        - infra/k8s/platform/postgres/**/*
+  script:
+    - kubectl apply -f infra/k8s/platform/postgres/
+
+apply-superset:
+  stage: infra
+  tags: [shell]
+  rules:
+    - changes:
+        - infra/k8s/apps/superset/**/*
+  script:
+    - kubectl apply -f infra/k8s/apps/superset/
+
+build-superset:
+  stage: build
+  tags: [shell]
+  needs:
+    - job: apply-superset
+      optional: true
+  rules:
+    - changes:
+        - apps/superset/**/*
+  script:
+    - cd apps/superset
+    - docker build -t localhost:5001/superset-pgdriver:$IMAGE_TAG .
+    - docker push localhost:5001/superset-pgdriver:$IMAGE_TAG
+
+deploy-superset:
+  stage: deploy
+  tags: [shell]
+  needs:
+    - job: build-superset
+  rules:
+    - changes:
+        - apps/superset/**/*
+  script:
+    - kubectl set image deployment/superset superset=localhost:5000/superset-pgdriver:$IMAGE_TAG
+    - kubectl rollout status deployment/superset --timeout=120s
+
+apply-n8n:
+  stage: infra
+  tags: [shell]
+  rules:
+    - changes:
+        - infra/k8s/apps/n8n/**/*
+  script:
+    - kubectl apply -f infra/k8s/apps/n8n/
+# --------------------------------

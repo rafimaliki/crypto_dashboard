@@ -1,0 +1,58 @@
+# https://kubernetes.io/docs/concepts/workloads/controllers/deployment/
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: listener
+  namespace: default
+  labels:
+    app: listener
+spec:
+  selector:
+    matchLabels:
+      app: listener
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: listener
+    spec:
+      containers:
+        - name: listener
+          image: localhost:5000/listener:v1
+          env:
+            - name: KAFKA_HOST
+              value: kafka:9092
+            - name: COINBASE_WS
+              value: wss://ws-feed.exchange.coinbase.com
+---
+# https://kubernetes.io/docs/concepts/workloads/controllers/deployment/
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: persistence
+  namespace: default
+  labels:
+    app: persistence
+spec:
+  selector:
+    matchLabels:
+      app: persistence
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: persistence
+    spec:
+      containers:
+        - name: persistence
+          image: localhost:5000/persistence:v1
+          envFrom:
+            - secretRef:
+                name: postgres-secret
+          env:
+            - name: KAFKA_HOST
+              value: kafka:9092
+            - name: POSTGRES_HOST
+              value: postgres
+            - name: POSTGRES_PORT
+              value: "5432"
